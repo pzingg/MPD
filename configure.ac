@@ -115,13 +115,20 @@ dnl Language Checks
 dnl ---------------------------------------------------------------------------
 
 AC_CXX_COMPILE_STDCXX_0X
-if test "$ax_cv_cxx_compile_cxx0x_native" != yes; then
-	if test "$ax_cv_cxx_compile_cxx0x_gxx" = yes; then
-	   	AM_CXXFLAGS="$AM_CXXFLAGS -std=gnu++0x"
-	elif test "$ax_cv_cxx_compile_cxx0x_cxx" = yes; then
-	   	AM_CXXFLAGS="$AM_CXXFLAGS -std=c++0x"
+case "$host_os" in
+darwin*)
+	AM_CXXFLAGS="$AM_CXXFLAGS -std=gnu++0x -I/usr/local/include/c++/4.8.0/x86_64-apple-darwin12.2.0 -I/usr/local/include/c++/4.8.0"
+	;;
+*)
+	if test "$ax_cv_cxx_compile_cxx0x_native" != yes; then
+		if test "$ax_cv_cxx_compile_cxx0x_gxx" = yes; then
+		   	AM_CXXFLAGS="$AM_CXXFLAGS -std=gnu++0x"
+		elif test "$ax_cv_cxx_compile_cxx0x_cxx" = yes; then
+		   	AM_CXXFLAGS="$AM_CXXFLAGS -std=c++0x"
+		fi
 	fi
-fi
+	;;
+esac
 
 dnl ---------------------------------------------------------------------------
 dnl Header/Library Checks

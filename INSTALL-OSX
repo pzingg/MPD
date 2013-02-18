@@ -1,0 +1,47 @@
+Getting MPD to build on OS X 10.8.
+Notes by Peter Zingg, https://github/pzingg
+
+Install Xcode 4.4
+
+Launch Xcode. In Preferences > Downloads, Install Command line tools.
+
+Install homebrew or other OS X package manager.
+
+Install the required GLib library and additional encoder and decoder 
+libraries as described in INSTALL:
+brew install glib
+brew install mad
+brew install faad2
+brew install libao
+
+Download GNU compiler from HPC on OS X at Sourceforge:
+http://sourceforge.net/projects/hpc/
+
+Install GNU compiler and standard libraries:
+sudo tar xvzf gcc-mlion.tar.gz -C /
+
+NOTE: I think a new GNU compiler can also be installed via homebrew.
+
+Hack configure.ac to find GNU standard libraries that gcc-mlion.tar.gz 
+installs.  FIXME: The following change is a bad hack.  Autoconf should
+be able to find the standard libraries on Darwin, either with the 
+Apple-supplied Clang-based compilers, or with the official GNU compilers.
+Probably need to do a check for these in various standard install
+locations, but I'm not an autoconf expert.
+
+AC_CXX_COMPILE_STDCXX_0X
+case "$host_os" in
+darwin*)
+	AM_CXXFLAGS="$AM_CXXFLAGS -std=gnu++0x -I/usr/local/include/c++/4.8.0/x86_64-apple-darwin12.2.0 -I/usr/local/include/c++/4.8.0"
+	;;
+*)
+	if test "$ax_cv_cxx_compile_cxx0x_native" != yes; then
+		if test "$ax_cv_cxx_compile_cxx0x_gxx" = yes; then
+		   	AM_CXXFLAGS="$AM_CXXFLAGS -std=gnu++0x"
+		elif test "$ax_cv_cxx_compile_cxx0x_cxx" = yes; then
+		   	AM_CXXFLAGS="$AM_CXXFLAGS -std=c++0x"
+		fi
+	fi
+	;;
+esac
+

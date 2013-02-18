@@ -236,6 +236,11 @@ AC_ARG_ENABLE(gme,
 		[enable Blargg's game music emulator plugin]),,
 	enable_gme=auto)
 
+AC_ARG_ENABLE(hls,
+	AS_HELP_STRING([--enable-hls],
+		[enables HTTP Live Streaming output]),,
+	[enable_hls_output=auto])
+
 AC_ARG_ENABLE(httpd-output,
 	AS_HELP_STRING([--enable-httpd-output],
 		[enables the HTTP server output]),,
@@ -1497,6 +1502,23 @@ esac
 
 AM_CONDITIONAL(ENABLE_WINMM_OUTPUT, test x$enable_winmm_output = xyes)
 
+dnl --------------------------------- HLS -----------------------------------
+if test x$enable_hls_output = xauto; then
+	if test x$enable_lame_encoder != xno ||
+		test x$enable_twolame_encoder != xno; then
+		enable_hls_output=yes
+	else
+		AC_MSG_WARN([No MP3 encoder plugin -- disabling HTTP LIve Streaming])
+		enable_hls_output=no
+	fi
+fi
+
+if test x$enable_hls_output = xyes; then
+	AC_DEFINE(ENABLE_HLS_OUTPUT, 1, [Define to enable HTTP Live Streaming])
+fi
+
+AM_CONDITIONAL(ENABLE_HLS_OUTPUT, test x$enable_hls_output = xyes)
+
 dnl --------------------- Post Audio Output Plugins Tests ---------------------
 if
 	test x$enable_alsa = xno &&
@@ -1516,6 +1538,7 @@ if
 	test x$enable_shout = xno &&
 	test x$enable_solaris_output = xno &&
 	test x$enable_winmm_output = xno &&
+	test x$enable_hls_output = xno &&
 
 		AC_MSG_ERROR([No Audio Output types configured!])
 fi
@@ -1675,6 +1698,7 @@ results(roar,[ROAR])
 results(shout, [SHOUTcast])
 results(solaris_output, [Solaris])
 results(winmm_output, [WinMM])
+results(hls_output, [HTTP LIve Streaming])
 
 if
 	test x$enable_shout = xyes ||

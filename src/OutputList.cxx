@@ -38,6 +38,7 @@
 #include "output/shout_output_plugin.h"
 #include "output/solaris_output_plugin.h"
 #include "output/winmm_output_plugin.h"
+#include "output/HlsOutputPLugin.hxx"
 
 const struct audio_output_plugin *const audio_output_plugins[] = {
 #ifdef HAVE_SHOUT
@@ -88,6 +89,9 @@ const struct audio_output_plugin *const audio_output_plugins[] = {
 #endif
 #ifdef ENABLE_WINMM_OUTPUT
 	&winmm_output_plugin,
+#endif
+#ifdef ENABLE_HLS_OUTPUT
+	&hls_output_plugin,
 #endif
 #ifdef ENABLE_FFADO_OUTPUT
 	&ffado_output_plugin,

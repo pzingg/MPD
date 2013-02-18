@@ -907,6 +907,10 @@ liboutput_plugins_a_SOURCES += \
 libmixer_plugins_a_SOURCES += src/mixer/winmm_mixer_plugin.c
 endif
 
+if ENABLE_HLS_OUTPUT
+liboutput_plugins_a_SOURCES += \
+	src/output/HlsOutputPlugin.cxx src/output/HlsOutputPlugin.hxx
+endif
 
 #
 # Playlist plugins

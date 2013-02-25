@@ -50,6 +50,15 @@ hls_output_quark(void)
 	return g_quark_from_static_string("hls_output");
 }
 
+enum HlsPlaylistType {
+	PLAYLIST_TYPE_LIVE,
+	PLAYLIST_TYPE_EVENT,
+	PLAYLIST_TYPE_VOD
+};
+
+#define ENCODER_COPY_BUFFER_SIZE 8192
+#define FILE_COPY_BUFFER_SIZE 8192
+
 struct HlsSegment final {
 
 	/**
@@ -85,7 +94,7 @@ struct HlsSegment final {
 	HlsSegment(unsigned seq_no, GTimeVal *start_time, const char *seg_title);
 	~HlsSegment();
 	
-	inline bool IsOpen() { return fd != 0; }
+	inline bool IsOpen() { return fd >= 0; }
 	bool CheckDuration(size_t size, unsigned time_rate, 
 		unsigned target_duration);
 	int Open(struct HlsSegmenter* segmenter, GError **error_r);
@@ -103,6 +112,32 @@ struct HlsSegmenter final {
 	 */
 	int version;
 
+	/**
+	 * Instruct HLS clients to allow cache;
+	 */
+	bool allow_cache;
+
+	/**
+	 * Playlist type: "LIVE", "EVENT" or "VOD".
+	 * Currently only supports "LIVE" playlists, where the m3u8
+	 * index file is rewritten as new segments are available.
+	 * If you choose "EVENT" or "VOD", the index file will never
+	 * be written until the output is stopped.
+	 * TODO: Implement EVENT and VOD playlist types.
+	 * For EVENT type, the m3u8 is only appended to (not rewritten).
+     * An event playlist looks just like a live playlist to start out with. 
+     * It doesn't initially have an EXT-X-ENDLIST tag, indicating that new
+     * media files will be added to the playlist as they become available.
+     * New segments are added until the event has concluded, at which time 
+     * the EXT-X-ENDLIST tag is appended.
+	 * For VOD type, the m3u8 is fixed (only written when done).
+     * The index file is static and contains a complete list of URLs 
+     * to all media files created since the beginning of the presentation.
+     * This kind of session allows the client full access to the entire
+     * program.
+	 */
+	HlsPlaylistType playlist_type;
+	
 	/**
 	 * Base URL for segments.
 	 */
@@ -164,7 +199,7 @@ struct HlsSegmenter final {
 	struct encoder *encoder;
 	
 	/**
-	 * Synchronization timer for realtime index.
+	 * Synchronization timer for live playlist index.
 	*/
 	struct timer *timer;
 	
@@ -185,9 +220,9 @@ struct HlsSegmenter final {
 	bool encoder_opened;
 		
 	/**
-	 * True if we are re-writing the m3u8 index file in real time.
+	 * True if header written (EVENT or VOD playlist).
 	 */
-	bool realtime;
+	bool append_to_index;
 	
 	/**
 	 * True if we unlink expired segments.
@@ -233,25 +268,31 @@ struct HlsSegmenter final {
 		GError **error_r);
 	void FinishActiveSegment();
 	void RemoveSegment(unsigned i);
-	bool WriteIndexFile(GError **error_r);
-	bool UpdateWindowAndIndexFile(GError **error_r);
-	size_t WriteData(const void *chunk, size_t size, GError **error_r);
+	bool WriteIndexFile(bool finished, GError **error_r);
+	bool UpdateWindowAndIndexFile(bool finished, GError **error_r);
 	
 	bool Configure(const config_param *param, GError **error_r);
+	void Stop();
 	void Finish();
 	bool Bind(GError **error_r);
 	void Unbind();
 	bool Open(struct audio_format *af, GError **error_r);
 	void Close();
+	unsigned Delay();
+	size_t Play(const void *chunk, size_t size, GError **error_r);
 	bool Pause();
 	void SendTag(const struct tag *tag);
 	void Cancel();
 };
 
+
+/*
+ * HlsSegment class implementation.
+ */
 inline HlsSegment::HlsSegment(unsigned seq_no, GTimeVal *start_time, 
 	const char *seg_title) : 
 	seq(seq_no),
-	fd(0),
+	fd(-1),
 	program_datetime(nullptr),
 	title(nullptr),
 	encoded(0),
@@ -267,12 +308,11 @@ HlsSegment::~HlsSegment()
 	g_free(title);
 }
 
-
-/* We calculate in millisecs */
 inline bool 
 HlsSegment::CheckDuration(size_t size, unsigned time_rate, 
 	unsigned target_duration)
 {
+	/* We calculate in millisecs -- good enough */
 	unsigned check = (unsigned)(((uint64_t)(encoded + size) * 1000) /
 		time_rate);
 	unsigned target = target_duration * 1000;
@@ -287,14 +327,14 @@ HlsSegment::CheckDuration(size_t size, unsigned time_rate,
 inline int 
 HlsSegment::Open(struct HlsSegmenter* segmenter, GError **error_r)
 {
-	if (!fd) {
+	if (fd < 0) {
 		char buf[256];
 		const char* segment_path = segmenter->MediaSegmentPath(buf,
 			sizeof(buf), this);
 		
 		if (segment_path)
 			fd = open_cloexec(segment_path, O_CREAT|O_WRONLY|O_TRUNC, 0666);
-		if (!fd)
+		if (fd < 0)
 			g_set_error(error_r, hls_output_quark(), 0,
 				"Cannot open segment seq %u at '%s'", seq, segment_path);
 		else
@@ -307,9 +347,9 @@ HlsSegment::Open(struct HlsSegmenter* segmenter, GError **error_r)
 inline void 
 HlsSegment::Close()
 {
-	if (fd) {
+	if (fd >= 0) {
 		close(fd);
-		fd = 0;
+		fd = -1;
 	}
 }
 
@@ -325,9 +365,9 @@ inline size_t
 HlsSegment::FlushEncodedData(struct encoder* encoder, GError **error_r)
 {
 	size_t length, total;
-	static char buffer[32768];	
+	static char buffer[ENCODER_COPY_BUFFER_SIZE];	
 
-	if (!fd) {
+	if (fd < 0) {
 		g_set_error(error_r, hls_output_quark(), 0,
 			"Cannot write data: segment not open");
 		return 0;
@@ -341,6 +381,9 @@ HlsSegment::FlushEncodedData(struct encoder* encoder, GError **error_r)
 	return total;
 }	
 
+/*
+ * Returns true if encoder was closed.
+ */
 inline bool
 HlsSegment::Finish(struct encoder* encoder, unsigned time_rate)
 {
@@ -351,11 +394,12 @@ HlsSegment::Finish(struct encoder* encoder, unsigned time_rate)
 	FlushEncodedData(encoder, &error);
 	Close();
 	encoder_close(encoder);
-	return true; // encoder closed
+	return true;
 }
 
-// Segmenter
-
+/*
+ * HlsSegmenter class implementation.
+ */
 #if GCC_CHECK_VERSION(4,6) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
@@ -373,6 +417,8 @@ Cast(audio_output *ao)
 
 inline HlsSegmenter::HlsSegmenter() :
 	version(HLS_PROTOCOL_VERSION),
+	allow_cache(false),
+	playlist_type(PLAYLIST_TYPE_LIVE),
 	segment_base_url(nullptr),
 	segment_file_dir(nullptr),
 	segment_file_base(nullptr),
@@ -386,7 +432,7 @@ inline HlsSegmenter::HlsSegmenter() :
 	index_file_path(nullptr),
 	open(false),
 	encoder_opened(false),
-	realtime(false),
+	append_to_index(false),
 	unlink_expired_segments(false),
 	time_rate(88200),
 	media_seq(0),
@@ -480,12 +526,19 @@ HlsSegmenter::RemoveSegment(unsigned i)
 
 
 inline bool
-HlsSegmenter::WriteIndexFile(GError **error_r) 
+HlsSegmenter::WriteIndexFile(bool finished, GError **error_r) 
 {
-	char buf[256];
-	int fd;
+	static char buffer[FILE_COPY_BUFFER_SIZE];	
+	char url_buf[512];
+	int fd_src, fd_dst;
 	unsigned i, temp_media_seq;
+	size_t copied;
+	const char *mode;
+	bool rv = false;
+	char *temp_path = nullptr;
 	FILE* f = nullptr;
+	HlsSegment* segment = nullptr;
+	bool first = !append_to_index;
 	
 	if (history_top >= window_top || history_top >= segments.size()) {
 		g_set_error(error_r, hls_output_quark(), 0,
@@ -494,54 +547,89 @@ HlsSegmenter::WriteIndexFile(GError **error_r)
 	}
 		
 	temp_media_seq = segments[history_top]->seq;
-	g_snprintf(buf, sizeof(buf), "%s.%u", index_file_path, temp_media_seq);
-	fd = open_cloexec(buf, 
-		O_CREAT|O_WRONLY|O_TRUNC, 0666);
-	if (!fd) {
-		g_set_error(error_r, hls_output_quark(), 0,
-			"Cannnot open index file '%s'", index_file_path);
-		return false;
+	
+	if (playlist_type == PLAYLIST_TYPE_LIVE) {
+		temp_path = g_strdup_printf("%s.%u", 
+			index_file_path, temp_media_seq);
+		fd_dst = open_cloexec(temp_path, O_CREAT|O_WRONLY|O_TRUNC, 0666);
+		mode = "w";
+	} else {
+		fd_dst = open_cloexec(index_file_path, O_CREAT|O_WRONLY|O_APPEND, 0666);
+		mode = "a";
 	}
 	
- 	f = fdopen(fd, "w");
+	if (fd_dst >= 0)	
+	 	f = fdopen(fd_dst, mode);
 	if (!f) {
 		g_set_error(error_r, hls_output_quark(), 0,
-			"Cannnot open index file '%s'", index_file_path);
-		return false;
-	}
-	fprintf(f, "#EXTM3U\n");
-	fprintf(f, "#EXT-X-VERSION:%d\n", version);
-	fprintf(f, "#EXT-X-TARGETDURATION:%u\n", target_duration); 
-    /**
-      * TODO: allow_cache
-      * fprintf(f, "#EXT-X-ALLOW-CACHE:%s\n", allow_cache ? "YES" : "NO"); 
-      */
-	fprintf(f, "#EXT-X-MEDIA-SEQUENCE:%u\n", temp_media_seq); 
- 
-	for (i = history_top; i < window_top; i++) {
-		HlsSegment* segment = segments[i];
-    	/**
-         * TODO: segment program datetime
-         * fprintf(f, "#EXT-X-PROGRAM-DATE-TIME:%s\n",
-         *      segment->program_datetime);
-         */
-		/* TODO: segment title with artist, etc */
-		fprintf(f, "#EXTINF:%0.2f,%s\n",
-			segment->duration, "" /* segment->title */); 
-		MediaSegmentURL(buf, sizeof(buf), segment);
-		fprintf(f, "%s\n", buf);
-	}
-	fflush(f);
-	fclose(f);
+			"Cannnot open index file '%s'", 
+			temp_path ? temp_path : index_file_path);
+	} else {
+		rv = true;
+		if (!append_to_index) {
+			fprintf(f, "#EXTM3U\n");
+			fprintf(f, "#EXT-X-VERSION:%d\n", version);
+			fprintf(f, "#EXT-X-TARGETDURATION:%u\n", target_duration); 
+		    fprintf(f, "#EXT-X-ALLOW-CACHE:%s\n", allow_cache ? "YES" : "NO"); 
+			fprintf(f, "#EXT-X-MEDIA-SEQUENCE:%u\n", temp_media_seq);
+			if (playlist_type == PLAYLIST_TYPE_EVENT || 
+				playlist_type == PLAYLIST_TYPE_VOD)
+				append_to_index = true;
+		}
+
+	   	/**
+	      * TODO: segment program datetime
+	      * IETF draft says this is only informative.
+	      * Only print this for first segment, or for a segment with an
+	      * EXT-X-DISCONTINUITY tag applied to it.
+	      */
+		for (i = history_top; i < window_top; i++) {
+			segment = segments[i];
+			if (first) {
+		    	fprintf(f, "#EXT-X-PROGRAM-DATE-TIME:%s\n",
+					segment->program_datetime);
+				first = false;
+			}
+			/* TODO: segment title with artist, etc */
+			fprintf(f, "#EXTINF:%0.2f,%s\n",
+				segment->duration, "" /* segment->title */); 
+			MediaSegmentURL(url_buf, sizeof(url_buf), segment);
+			fprintf(f, "%s\n", url_buf);
+		}
 	
-	/* TODO: rename or copy m3u8.0 temp file to m3u8 */
-	
-	media_seq = temp_media_seq;
-	return true;
+		if (finished) {
+			fprintf(f, "#EXT-X-ENDLIST\n");
+		}
+		fflush(f);
+		fclose(f);
+
+		/* copy m3u8.0 temp file to m3u8 */
+		if (temp_path) {
+			fd_src = open_cloexec(temp_path, O_RDONLY, 0666);
+			fd_dst = open_cloexec(index_file_path, 
+				O_CREAT|O_WRONLY|O_TRUNC, 0666);
+			if (fd_src >= 0 && fd_dst >= 0) {
+				while ((copied = read(fd_src, buffer, sizeof(buffer))) != 0) {
+					write(fd_dst, buffer, copied);
+				}
+			} else {
+				rv = false;
+			}
+			if (fd_src >= 0)
+				close(fd_src);
+			if (fd_dst >= 0)
+				close(fd_dst);
+		}
+	}
+	if (temp_path)
+		g_free(temp_path);
+	if (rv)
+		media_seq = temp_media_seq;
+	return rv;
 }
 
 inline bool
-HlsSegmenter::UpdateWindowAndIndexFile(GError **error_r)
+HlsSegmenter::UpdateWindowAndIndexFile(bool finished, GError **error_r)
 {
 	size_t active_size = segments.size() - history_top;
 	assert(segments.size() >= history_top);
@@ -551,55 +639,25 @@ HlsSegmenter::UpdateWindowAndIndexFile(GError **error_r)
 			media_seq, segments.size(), history_top, window_top);
 		g_debug("Segmenter::Update active_size=%u window_size=%u",
 			active_size, window_size);
-			
-		if (!WriteIndexFile(error_r))
+		
+		if (!WriteIndexFile(finished, error_r))
 			return false;
-		if (history_top >= history_size) {
-			size_t to_delete = history_top - history_size + 1;
-			size_t i = 0;
-			for (i = 0; i < to_delete; i++) {
-				RemoveSegment(0);
+		if (playlist_type == PLAYLIST_TYPE_LIVE) {
+			if (history_top >= history_size) {
+				size_t to_delete = history_top - history_size + 1;
+				size_t i = 0;
+				for (i = 0; i < to_delete; i++) {
+					RemoveSegment(0);
+				}
 			}
+			history_top++;
+			g_debug("Segmenter::Update after  ms=%u size=%u ht=%u wt=%u",
+				media_seq, segments.size(), history_top, window_top);
 		}
-		history_top++;
-		g_debug("Segmenter::Update after  ms=%u size=%u ht=%u wt=%u",
-			media_seq, segments.size(), history_top, window_top);
 	}
 	return true;
 }
 
-inline size_t 
-HlsSegmenter::WriteData(const void *chunk, size_t size, GError **error_r)
-{
-	HlsSegment* active = ActiveSegment();
-	if (active) {
-		// see if this segment can accept more data */
-		if (!active->CheckDuration(size, time_rate, target_duration)) {
-			FinishActiveSegment();
-			g_debug("Segmenter::WriteData segment %u finished", active->seq);
-			active = nullptr;
-		}
-	}
-	
-	if (!active) {
-		/* TODO: get the actual program time */
-		GTimeVal start_time;
-		g_get_current_time(&start_time);
-		active = StartNewSegment(&start_time, "Title", error_r);
-		if (!active) {
-			return 0;
-		}
-		g_debug("Segmenter::WriteData segment %u started, window_top=%u",
-			active->seq, window_top);
-	}
-	
-	active->Encode(encoder, chunk, size, error_r);
-	active->FlushEncodedData(encoder, error_r);
-	
-	if (!UpdateWindowAndIndexFile(error_r))
-		return 0;
-	return size;
-}
 
 inline HlsSegment* 
 HlsSegmenter::ActiveSegment()
@@ -650,9 +708,25 @@ HlsSegmenter::Configure(const config_param *param, GError **error_r)
 {
 	struct audio_format_string af_string;
 	GError *error = nullptr;
-	char *index_file_dir, *index_file_name;
+	char *index_file_dir;
+	const char *index_file_name;
 	
 	/* read configuration */
+	const char *pl_type = config_get_block_string(param, 
+		"playlist_type", "LIVE");
+	if (strcmp(pl_type, "LIVE") == 0)
+		playlist_type = PLAYLIST_TYPE_LIVE;
+	else if (strcmp(pl_type, "EVENT") == 0)
+		playlist_type = PLAYLIST_TYPE_EVENT;
+	else if (strcmp(pl_type, "VOD") == 0) 
+		playlist_type = PLAYLIST_TYPE_EVENT;
+	else {
+		g_set_error(error_r, hls_output_quark(), 0,
+			"Invalid playlist_type parameter specified");
+		return false;	
+	}
+	allow_cache = config_get_block_bool(param, "allow_cache", false);
+
 	index_file_dir = config_dup_block_path(param, 
 		"index_file_dir", &error);
 	if (!index_file_dir) {
@@ -663,12 +737,11 @@ HlsSegmenter::Configure(const config_param *param, GError **error_r)
 				    "No \"index_file_dir\" parameter specified");
 		return false;
 	}
-	index_file_name = config_dup_block_string(param, 
+	index_file_name = config_get_block_string(param, 
 		"index_file_name", "prog_index.m3u8");
 	index_file_path = g_strdup_printf("%s/%s", 
 		index_file_dir, index_file_name);
 	g_free(index_file_dir);
-	g_free(index_file_name);
 	
 	segment_file_dir = config_dup_block_path(param, 
 		"segment_file_dir", error_r);
@@ -733,11 +806,21 @@ hls_output_init(const struct config_param *param,
 	return &hls->base;
 }
 
+inline void
+HlsSegmenter::Stop()
+{
+	/* This is where we write out VOD playlists */
+	GError *error = nullptr;
+	timer_reset(timer);
+	FinishActiveSegment();
+	UpdateWindowAndIndexFile(true, &error);
+}
+
 inline void 
 HlsSegmenter::Finish()
 {
 	g_debug("Segmenter::Finish");
-	FinishActiveSegment();
+	Stop();
 	encoder_finish(encoder);
 	encoder = nullptr;	
 	ao_base_finish(&base);
@@ -831,12 +914,64 @@ hls_output_close(struct audio_output *ao)
 	hls->Close();
 }
 
+inline unsigned
+HlsSegmenter::Delay() 
+{
+	/* Calculate delay if we are rewriting the 
+	   m3u8 index file in real time. */
+	if (playlist_type == PLAYLIST_TYPE_LIVE && timer->started) {
+		unsigned delay = timer_delay(timer);
+		g_debug("Segmenter::Delay time %llu delay %u msec",
+			timer->time, delay);
+		return delay;
+	}
+	return 0;
+}
+
 static unsigned
 hls_output_delay(G_GNUC_UNUSED struct audio_output *ao)
 {
-	/* TODO: don't need delay unless we are rewriting the 
-	   m3u8 index file in real time. */
-	return 0;
+	HlsSegmenter *hls = Cast(ao);
+	return hls->Delay();
+}
+
+inline size_t 
+HlsSegmenter::Play(const void *chunk, size_t size, GError **error_r)
+{
+	if (playlist_type == PLAYLIST_TYPE_LIVE) {
+		if (!timer->started)
+			timer_start(timer);
+		timer_add(timer, size);
+	}
+	
+	HlsSegment* active = ActiveSegment();
+	if (active) {
+		/* see if this segment can accept more data */
+		if (!active->CheckDuration(size, time_rate, target_duration)) {
+			FinishActiveSegment();
+			g_debug("Segmenter::WriteData segment %u finished", active->seq);
+			active = nullptr;
+		}
+	}
+	
+	if (!active) {
+		/* TODO: get the actual program time */
+		GTimeVal start_time;
+		g_get_current_time(&start_time);
+		active = StartNewSegment(&start_time, "Title", error_r);
+		if (!active) {
+			return 0;
+		}
+		g_debug("Segmenter::WriteData segment %u started, window_top=%u",
+			active->seq, window_top);
+	}
+	
+	active->Encode(encoder, chunk, size, error_r);
+	active->FlushEncodedData(encoder, error_r);
+	
+	if (!UpdateWindowAndIndexFile(false, error_r))
+		return 0;
+	return size;
 }
 
 static size_t
@@ -844,13 +979,14 @@ hls_output_play(struct audio_output *ao, const void *chunk, size_t size,
 	GError **error_r)
 {
 	HlsSegmenter *hls = Cast(ao);
-	return hls->WriteData(chunk, size, error_r);
+	return hls->Play(chunk, size, error_r);
 }
 
 inline bool
 HlsSegmenter::Pause()
 {
-	g_debug("Segmenter::Pause");	
+	g_debug("Segmenter::Pause");
+	Stop();
 	return true;
 }
 
@@ -858,38 +994,38 @@ static bool
 hls_output_pause(struct audio_output *ao)
 {
 	HlsSegmenter *hls = Cast(ao);
-	
 	return hls->Pause();
 }
 
 inline void
 HlsSegmenter::SendTag(G_GNUC_UNUSED const struct tag *tag)
 {
+	g_debug("Segmenter::SendTag");
 	assert(tag != nullptr);
-	
-	// TODO: add tag to metadata, then use WebVTT to 
-	// expose metadata in playlist
+	/*
+	 * TODO: add tag to metadata, then use WebVTT to 
+	 * expose metadata in playlist.
+	 */
 }
 
 static void
 hls_output_tag(struct audio_output *ao, const struct tag *tag)
 {
 	HlsSegmenter *hls = Cast(ao);
-
 	hls->SendTag(tag);
 }
 
 inline void
 HlsSegmenter::Cancel()
 {
-	g_debug("Segmenter::Cancel");	
+	g_debug("Segmenter::Cancel");
+	Stop();
 }
 
 static void
 hls_output_cancel(struct audio_output *ao)
 {
-	HlsSegmenter *hls = Cast(ao);
-	
+	HlsSegmenter *hls = Cast(ao);	
 	hls->Cancel();
 }
 

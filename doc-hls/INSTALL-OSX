@@ -10,6 +10,7 @@ Install homebrew or other OS X package manager.
 Install the required GLib library and additional encoder and decoder 
 libraries as described in INSTALL:
 brew install glib
+brew install libid3tag
 brew install mad
 brew install faad2
 brew install libao

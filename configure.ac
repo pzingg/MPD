@@ -160,6 +160,11 @@ AC_ARG_ENABLE(mpdclient,
 		[enable support for the MPD client]),,
 	enable_libmpdclient=auto)
 
+AC_ARG_ENABLE(aacplus-encoder,
+	AS_HELP_STRING([--enable-aacplus-encoder],
+		[enable the aacplus encoder]),,
+	enable_aacplus_encoder=auto)
+
 AC_ARG_ENABLE(adplug,
 	AS_HELP_STRING([--enable-adplug],
 		[enable the AdPlug decoder plugin (default: auto)]),,
@@ -1181,12 +1186,14 @@ dnl ---------------------------------------------------------------------------
 dnl ------------------------------- Encoder API -------------------------------
 if test x$enable_shout = xyes || \
 	test x$enable_recorder_output = xyes || \
-	test x$enable_httpd_output = xyes; then
+	test x$enable_httpd_output = xyes ||
+	test x$enable_hls_output = xyes; then
 	# at least one output using encoders is explicitly enabled
 	need_encoder=yes
 elif test x$enable_shout = xauto || \
 	test x$enable_recorder_output = xauto || \
-	test x$enable_httpd_output = xauto; then
+	test x$enable_httpd_output = xauto ||
+	test x$enable_hls_output = xauto; then
 	need_encoder=auto
 else
 	# all outputs using encoders are disabled
@@ -1198,6 +1205,7 @@ else
 	enable_twolame_encoder=no
 	enable_wave_encoder=no
 	enable_flac_encoder=no
+	enable_aacplus_encoder=no
 fi
 
 dnl ------------------------------- FLAC Encoder ------------------------------
@@ -1251,6 +1259,16 @@ if test x$enable_twolame_encoder = xyes; then
 fi
 AM_CONDITIONAL(ENABLE_TWOLAME_ENCODER, test x$enable_twolame_encoder = xyes)
 
+dnl ----------------------------- AACPlus Encoder -----------------------------
+MPD_AUTO_PKG(aacplus_encoder, AACPLUS, [aacplus],
+	[aacplus encoder], [libaacplus not found])
+
+if test x$enable_aacplus_encoder = xyes; then
+	AC_DEFINE(ENABLE_AACPLUS_ENCODER, 1,
+		[Define to enable the aacplus encoder plugin])
+fi
+AM_CONDITIONAL(ENABLE_AACPLUS_ENCODER, test x$enable_aacplus_encoder = xyes)
+
 dnl ------------------------------- WAVE Encoder ------------------------------
 AM_CONDITIONAL(ENABLE_WAVE_ENCODER, test x$enable_wave_encoder = xyes)
 if test x$enable_wave_encoder = xyes; then
@@ -1263,6 +1281,7 @@ if test x$enable_vorbis_encoder != xno ||
 	test x$enable_opus != xno ||
 	test x$enable_lame_encoder != xno ||
 	test x$enable_twolame_encoder != xno ||
+	test x$enable_aacplus_encoder != xno ||
 	test x$enable_flac_encoder != xno ||
 	test x$enable_wave_encoder != xno; then
 	# at least one encoder plugin is enabled
@@ -1512,10 +1531,11 @@ AM_CONDITIONAL(ENABLE_WINMM_OUTPUT, test x$enable_winmm_output = xyes)
 dnl --------------------------------- HLS -----------------------------------
 if test x$enable_hls_output = xauto; then
 	if test x$enable_lame_encoder != xno ||
-		test x$enable_twolame_encoder != xno; then
+		test x$enable_twolame_encoder != xno ||
+		test x$enable_aacplus_encoder != xno; then
 		enable_hls_output=yes
 	else
-		AC_MSG_WARN([No MP3 encoder plugin -- disabling HTTP LIve Streaming])
+		AC_MSG_WARN([No MP3 or AAC encoder plugin -- disabling HTTP LIve Streaming])
 		enable_hls_output=no
 	fi
 fi

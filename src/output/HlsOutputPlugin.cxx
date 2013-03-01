@@ -162,12 +162,7 @@ struct HlsSegmenter final {
 	 * Extension of segment file, default '.mp3'
 	 */
 	char *segment_file_ext;
-	
-	/**
-	 * Bitrate for encoding.
-	 */
-	unsigned bitrate;
-	
+		
 	/**
 	 * Maximum length of segment in seconds.
 	 */
@@ -561,7 +556,6 @@ inline HlsSegmenter::HlsSegmenter() :
 	segment_file_dir(nullptr),
 	segment_file_base(nullptr),
 	segment_file_ext(nullptr),
-	bitrate(128),
 	target_duration(10),
 	window_size(5),
 	history_size(5),
@@ -601,23 +595,25 @@ HlsSegmenter::ConfigureEncoder(const config_param *param, GError **error_r)
 		encoder_name = "aacplus";
 	else if (strcmp(segment_file_ext, "mp3") == 0)
 		encoder_name = "lame";
-	if (!encoder_name) 
-	{
+		
+	if (!encoder_name) {
 		g_set_error(error_r, hls_output_quark(), 0,
 			    "Invalid \"segment_file_ext\" parameter specified. Must be aac or mp3.");
 		return false;
 	}
-	const struct encoder_plugin *encoder_plugin = encoder_plugin_get(encoder_name);
+	
+	const struct encoder_plugin *encoder_plugin =
+		encoder_plugin_get(encoder_name);
 	if (!encoder_plugin) 
 	{
 		g_set_error(error_r, hls_output_quark(), 0,
 			    "No encoder available for specified \"segment_file_ext\" parameter.");
 		return false;
 	}
+	
 	encoder = encoder_init(encoder_plugin, param, error_r);
 	if (!encoder)
 		return false;
-	
 	return true;
 }
 
@@ -654,7 +650,6 @@ inline const char* HlsSegmenter::MediaSegmentURL(char* buf, size_t bufsiz,
 inline void
 HlsSegmenter::RemoveSegment(unsigned i)
 {
-	
 	assert(i < segments.size());
 	HlsSegment* segment = segments[i];
 	assert(!segment->IsOpen());
@@ -902,7 +897,6 @@ HlsSegmenter::FinishActiveSegment()
 inline bool
 HlsSegmenter::Configure(const config_param *param, GError **error_r)
 {
-	struct audio_format_string af_string;
 	GError *error = nullptr;
 	char *index_file_dir;
 	const char *index_file_name;
@@ -958,12 +952,6 @@ HlsSegmenter::Configure(const config_param *param, GError **error_r)
 		return false;
 	}
 
-	bitrate = config_get_block_unsigned(param, "bitrate", 128);
-	if (bitrate == 0) {
-		g_set_error(error_r, hls_output_quark(), 0,
-				    "No \"bitrate\" parameter specified");
-		return false;
-	}
 	segment_file_ext = config_dup_block_string(param, 
 		"segment_file_ext", "mp3");
 	if (!ConfigureEncoder(param, error_r))
@@ -975,11 +963,6 @@ HlsSegmenter::Configure(const config_param *param, GError **error_r)
 		"target_duration", 10);	
 	window_size  = config_get_block_unsigned(param, "window_size", 5);
 	history_size = config_get_block_unsigned(param, "history_size",  5);
-
-	g_debug("Segmenter::Configure in  format: %s",
-		audio_format_to_string(&base.in_audio_format, &af_string));
-	g_debug("Segmenter::Configure out format: %s",
-		audio_format_to_string(&base.out_audio_format, &af_string));
 	return true;
 }
 
@@ -1067,6 +1050,13 @@ HlsSegmenter::Open(struct audio_format *af, GError **error_r)
 {
 	assert(!open);
 	assert(!encoder_opened);
+	
+	if (af->format != SAMPLE_FORMAT_FLOAT && 
+		af->format != SAMPLE_FORMAT_S16) {
+		g_warning("Setting output format to f, was %s",
+			sample_format_to_string((sample_format)af->format));
+		af->format = SAMPLE_FORMAT_FLOAT;
+	}
 	
 	if (!encoder_open(encoder, af, error_r))
 		return false;

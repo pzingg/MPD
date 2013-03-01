@@ -628,7 +628,8 @@ libencoder_plugins_a_CPPFLAGS = $(AM_CPPFLAGS) \
 	$(TWOLAME_CFLAGS) \
 	$(patsubst -I%/FLAC,-I%,$(FLAC_CFLAGS)) \
 	$(OPUS_CFLAGS) \
-	$(VORBISENC_CFLAGS)
+	$(VORBISENC_CFLAGS) \
+	$(AACPLUS_CFLAGS)
 
 ENCODER_LIBS = \
 	libencoder_plugins.a \
@@ -636,7 +637,8 @@ ENCODER_LIBS = \
 	$(TWOLAME_LIBS) \
 	$(FLAC_LIBS) \
 	$(OPUS_LIBS) \
-	$(VORBISENC_LIBS)
+	$(VORBISENC_LIBS) \
+	$(AACPLUS_LIBS)
 
 libencoder_plugins_a_SOURCES = \
 	src/encoder/OggStream.hxx \
@@ -657,6 +659,12 @@ if HAVE_OPUS
 libencoder_plugins_a_SOURCES += \
 	src/encoder/OpusEncoderPlugin.cxx \
 	src/encoder/OpusEncoderPlugin.hxx
+endif
+
+if ENABLE_AACPLUS_ENCODER
+libencoder_plugins_a_SOURCES += \
+	src/encoder/AacPlusEncoderPlugin.cxx \
+	src/encoder/AacPlusEncoderPlugin.hxx
 endif
 
 if ENABLE_LAME_ENCODER

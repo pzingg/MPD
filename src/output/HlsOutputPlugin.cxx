@@ -670,7 +670,6 @@ HlsSegmenter::RemoveSegment(unsigned i)
 		window_top--;
 }
 
-
 inline bool
 HlsSegmenter::CopyTempFile(const char* src, const char *dst, 
 	long src_size, GError **error_r) 
@@ -1050,13 +1049,6 @@ HlsSegmenter::Open(struct audio_format *af, GError **error_r)
 {
 	assert(!open);
 	assert(!encoder_opened);
-	
-	if (af->format != SAMPLE_FORMAT_FLOAT && 
-		af->format != SAMPLE_FORMAT_S16) {
-		g_warning("Setting output format to f, was %s",
-			sample_format_to_string((sample_format)af->format));
-		af->format = SAMPLE_FORMAT_FLOAT;
-	}
 	
 	if (!encoder_open(encoder, af, error_r))
 		return false;

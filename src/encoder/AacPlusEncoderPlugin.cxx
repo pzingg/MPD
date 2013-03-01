@@ -34,16 +34,18 @@
 #undef G_LOG_DOMAIN
 #define G_LOG_DOMAIN "aacplus_encoder"
 
+#define AAC_BITRATE_AUTO 64000
+#define AAC_BITRATE_MAX  64000
+
 struct AacPlusEncoder final {
 	/** the base class */
 	struct encoder encoder;
 
 	/* configuration */
-	int   bitrate;                 /* kbits per second */
+	unsigned long bitrate;        /* in bits per second */
+	
 	/* TODO 
 	int   bandWidth;
-	int   nSamplesPerFrame;        1024 by default
-	int   inputSamples;            number of input samples to use
 	*/
 
 	/* runtime information */
@@ -87,7 +89,7 @@ Cast(struct encoder *_encoder)
 #endif
 
 AacPlusEncoder::AacPlusEncoder() :
-	bitrate(64), 
+	bitrate(64000), 
 	input_samples(0),
 	max_output_bytes(0),
 	output_size(0),
@@ -103,12 +105,21 @@ inline bool
 AacPlusEncoder::Configure(G_GNUC_UNUSED const struct config_param *param,
 	G_GNUC_UNUSED GError **error_r)
 {
-	/* TODO 
-	int   bitrate;                 kbits per second
-	int   bandWidth;
-	int   nSamplesPerFrame;        1024 by default
-	int   inputSamples;            number of input samples to use
-	*/
+	const char *value = config_get_block_string(param, "bitrate", "auto");
+	if (strcmp(value, "auto") == 0)
+		bitrate = AAC_BITRATE_AUTO;
+	else if (strcmp(value, "max") == 0)
+		bitrate = AAC_BITRATE_MAX;
+	else {
+		char *endptr;
+		bitrate = strtoul(value, &endptr, 10);
+		if (endptr == value || *endptr != 0 ||
+		    bitrate < 500 || bitrate > 512000) {
+			g_set_error(error_r, aacplus_encoder_quark(), 0,
+				"Invalid bit rate");
+			return false;
+		}
+	}
 	return true;
 }
 
@@ -163,13 +174,16 @@ AacPlusEncoder::Open(struct audio_format *af, GError **error_r)
 	assert(aacplus == nullptr);
 	assert(output_buffer == nullptr);
 
-	/* af->format = SAMPLE_FORMAT_S16; */
-	af->format = SAMPLE_FORMAT_FLOAT;
 	af->channels = 2;
+	if (af->format != SAMPLE_FORMAT_FLOAT && 
+		af->format != SAMPLE_FORMAT_S16) {
+		g_warning("Setting output format to 16, was %s",
+			sample_format_to_string((sample_format)af->format));
+		af->format = SAMPLE_FORMAT_S16;
+	}
 
-	audio_format = *af;
-	aacplus = aacplusEncOpen(audio_format.sample_rate,
-		audio_format.channels,
+	aacplus = aacplusEncOpen(af->sample_rate,
+		af->channels,
 		&samples,
 		&max_bytes);
 	if (!aacplus) {
@@ -182,18 +196,14 @@ AacPlusEncoder::Open(struct audio_format *af, GError **error_r)
 			"required output samples or buffer size too large");
 		return false;
 	}
-	input_samples = (unsigned)samples;
-	max_output_bytes = (unsigned)max_bytes;
-	
 	aacplus_config = aacplusEncGetCurrentConfiguration(aacplus);
-	/* convert bitrate to bits per second */
-	aacplus_config->bitRate      = bitrate * 1000; 
+	aacplus_config->bitRate      = (int)bitrate; 
 	aacplus_config->bandWidth    = 0; /* lowpass frequency cutoff */
 	aacplus_config->outputFormat = 1; /* ADTS frames */
 	aacplus_config->nChannelsOut = 2;
-	if (audio_format.format == SAMPLE_FORMAT_FLOAT)
+	if (af->format == SAMPLE_FORMAT_FLOAT)
 		aacplus_config->inputFormat = AACPLUS_INPUT_FLOAT;
-	else if (audio_format.format == SAMPLE_FORMAT_S16)
+	else if (af->format == SAMPLE_FORMAT_S16)
 		aacplus_config->inputFormat = AACPLUS_INPUT_16BIT;
 
 	if (!aacplusEncSetConfiguration(aacplus, aacplus_config)) {
@@ -201,6 +211,11 @@ AacPlusEncoder::Open(struct audio_format *af, GError **error_r)
 			"error configuring libaacplus library");
 		return false;
 	}
+	
+	/* save for later use */
+	audio_format = *af;
+	input_samples = (unsigned)samples;
+	max_output_bytes = (unsigned)max_bytes;
 	
 	g_debug("aacplus config:");
 	g_debug(".sampleRate %d", aacplus_config->sampleRate);

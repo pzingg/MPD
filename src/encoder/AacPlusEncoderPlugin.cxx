@@ -399,7 +399,7 @@ AacPlusEncoder::Write(const void *data, size_t length, GError **error_r)
 			max_output_bytes);
 	
 		if (out_bytes <= 0) {
-			g_warningi("AacPlusEncoder::Write aacPlusEncEncode returned %d", out_bytes);
+			g_warning("AacPlusEncoder::Write aacPlusEncEncode returned %d", out_bytes);
 			return false;
 		}
 		write_pos += out_bytes;

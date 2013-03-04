@@ -17,7 +17,13 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-/* Note: Implementation details taken from DarkIce project:
+/* MPD encoder wrapper around the AAC+ encoding library here:
+ * http://tipok.org.ua/ru/node/17
+ * 
+ * Which is in turn based on the 3GPP reference specification for AAC+:
+ * http://www.3gpp.org/ftp/Specs/html-info/26410.htm
+ *
+ * Note: Implementation details taken from DarkIce project:
  * https://code.google.com/p/darkice
  */
 
@@ -34,8 +40,16 @@
 #undef G_LOG_DOMAIN
 #define G_LOG_DOMAIN "aacplus_encoder"
 
-#define AAC_BITRATE_AUTO 64000
-#define AAC_BITRATE_MAX  64000
+#define AACPLUS_BITRATE_AUTO  64000
+#define AACPLUS_BITRATE_MAX   64000
+#define AACPLUS_SAMPLE_FORMAT SAMPLE_FORMAT_FLOAT
+
+/* left out of aacplus.h */
+enum AacPlusOutputFormat {
+	AACPLUS_OUTPUT_RAW = 0,
+	AACPLUS_OUTPUT_ADTS  /* ADTS frames */
+};
+#define AACPLUS_OUTPUT_FORMAT AACPLUS_OUTPUT_RAW
 
 struct AacPlusEncoder final {
 	/** the base class */
@@ -107,9 +121,9 @@ AacPlusEncoder::Configure(G_GNUC_UNUSED const struct config_param *param,
 {
 	const char *value = config_get_block_string(param, "bitrate", "auto");
 	if (strcmp(value, "auto") == 0)
-		bitrate = AAC_BITRATE_AUTO;
+		bitrate = AACPLUS_BITRATE_AUTO;
 	else if (strcmp(value, "max") == 0)
-		bitrate = AAC_BITRATE_MAX;
+		bitrate = AACPLUS_BITRATE_MAX;
 	else {
 		char *endptr;
 		bitrate = strtoul(value, &endptr, 10);
@@ -171,15 +185,17 @@ AacPlusEncoder::Open(struct audio_format *af, GError **error_r)
 	aacplusEncConfiguration *aacplus_config;
 	unsigned long samples = 0;
 	unsigned long max_bytes = 0;
+	sample_format format = (sample_format)af->format;
 	assert(aacplus == nullptr);
 	assert(output_buffer == nullptr);
 
 	af->channels = 2;
 	if (af->format != SAMPLE_FORMAT_FLOAT && 
 		af->format != SAMPLE_FORMAT_S16) {
-		g_warning("Setting output format to 16, was %s",
-			sample_format_to_string((sample_format)af->format));
-		af->format = SAMPLE_FORMAT_S16;
+		af->format = AACPLUS_SAMPLE_FORMAT;
+		g_warning("Setting output format to %s, was %s",
+			sample_format_to_string((sample_format)af->format),
+			sample_format_to_string(format));
 	}
 
 	aacplus = aacplusEncOpen(af->sample_rate,
@@ -188,18 +204,18 @@ AacPlusEncoder::Open(struct audio_format *af, GError **error_r)
 		&max_bytes);
 	if (!aacplus) {
 		g_set_error(error_r, aacplus_encoder_quark(), 0,
-			"error opening aacplus handle");
+			"Error opening aacplus handle");
 		return false;
 	}
 	if (samples > UINT_MAX || max_bytes > UINT_MAX) {
 		g_set_error(error_r, aacplus_encoder_quark(), 0,
-			"required output samples or buffer size too large");
+			"Required output samples or buffer size too large");
 		return false;
 	}
 	aacplus_config = aacplusEncGetCurrentConfiguration(aacplus);
 	aacplus_config->bitRate      = (int)bitrate; 
 	aacplus_config->bandWidth    = 0; /* lowpass frequency cutoff */
-	aacplus_config->outputFormat = 1; /* ADTS frames */
+	aacplus_config->outputFormat = AACPLUS_OUTPUT_FORMAT;
 	aacplus_config->nChannelsOut = 2;
 	if (af->format == SAMPLE_FORMAT_FLOAT)
 		aacplus_config->inputFormat = AACPLUS_INPUT_FLOAT;
@@ -208,7 +224,7 @@ AacPlusEncoder::Open(struct audio_format *af, GError **error_r)
 
 	if (!aacplusEncSetConfiguration(aacplus, aacplus_config)) {
 		g_set_error(error_r, aacplus_encoder_quark(), 0,
-			"error configuring libaacplus library");
+			"Error configuring libaacplus library");
 		return false;
 	}
 	
@@ -230,10 +246,10 @@ AacPlusEncoder::Open(struct audio_format *af, GError **error_r)
 	g_debug("encoder input_samples %u max_output_bytes %u",
 		input_samples, max_output_bytes);
 		
-	output_buffer = (unsigned char *)g_malloc(max_output_bytes);
+	output_buffer = (unsigned char *)g_try_malloc(max_output_bytes);
 	if (!output_buffer) {
 		g_set_error(error_r, aacplus_encoder_quark(), 0,
-			"not enough memory for output buffer");
+			"Not enough memory for output buffer");
 		return false;
 	}
 	write_pos = 0;
@@ -258,17 +274,84 @@ aacplus_encoder_close(struct encoder *_encoder)
 	encoder->Reset();
 }
 
+static void
+debug_buffer(const void *data, size_t length, const audio_format *af)
+{
+	size_t i;
+	assert(af->channels == 2);
+	const char *b;
+	const short *s;
+	const long *l;
+	const float *f;
+
+	switch (af->format) {
+	case SAMPLE_FORMAT_S8:
+		b = (const char *)data;
+		g_debug("%u bytes of S8");
+		for (i = 0; i < 16; i += 2) {
+			g_debug("L%d R%d", (int)b[i], (int)b[i+1]);
+		}
+		break;
+
+	case SAMPLE_FORMAT_S16:
+		s = (const short *)data;
+		g_debug("%u bytes of S16");
+		for (i = 0; i < 16; i += 2) {
+			g_debug("L%d R%d", (int)s[i], (int)s[i+1]);
+		}
+		break;
+
+	case SAMPLE_FORMAT_S24_P32:
+		l = (const long *)data;
+		g_debug("%u bytes of S24_P32");
+		for (i = 0; i < 16; i += 2) {
+			g_debug("L%ld R%ld", l[i], l[i+1]);
+		}
+		break;
+
+	case SAMPLE_FORMAT_S32:
+		l = (const long *)data;
+		g_debug("%u bytes of S32");
+		for (i = 0; i < 16; i += 2) {
+			g_debug("L%ld R%ld", l[i], l[i+1]);
+		}
+		break;
+
+	case SAMPLE_FORMAT_FLOAT:
+		f = (const float *)data;
+		g_debug("%u bytes of FLOAT");
+		for (i = 0; i < 16; i += 2) {
+			g_debug("L%.0f R%.0f", f[i], f[i+1]);
+		}
+		break;
+
+	case SAMPLE_FORMAT_DSD:
+		g_debug("%u bytes of dsd");
+		break;
+	}
+}
+
 inline bool
 AacPlusEncoder::Write(const void *data, size_t length, GError **error_r)
 {
+	static bool debug = true;
 	const unsigned char *b = (const unsigned char *)data; 
 	unsigned sample_size = audio_format_frame_size(&audio_format);
 	unsigned total_samples = length / sample_size;
+	unsigned modulo = length % sample_size;
 	unsigned processed_samples = 0;
 	assert(aacplus != nullptr);
 	
+	if (debug) {
+		debug_buffer(data, length, &audio_format);
+		debug = false;
+	}
+	
 	g_debug("AacPlusEncoder::Write length=%u total_samples=%u max_samples=%u",
 		length, total_samples, input_samples);
+	if (modulo != 0)
+		g_warning("AacPlusEncoder::Write will drop %u bytes of buffer, %u not a multiple of %u sample_size", modulo, length, sample_size);
+
 	while (processed_samples < total_samples) {
 		int out_bytes;
 		unsigned size_needed; 
@@ -316,8 +399,7 @@ AacPlusEncoder::Write(const void *data, size_t length, GError **error_r)
 			max_output_bytes);
 	
 		if (out_bytes <= 0) {
-			g_set_error(error_r, aacplus_encoder_quark(), 0,
-				"aacPlusEncEncode returned %d", out_bytes);
+			g_warningi("AacPlusEncoder::Write aacPlusEncEncode returned %d", out_bytes);
 			return false;
 		}
 		write_pos += out_bytes;
